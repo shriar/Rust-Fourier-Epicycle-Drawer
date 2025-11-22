@@ -31,7 +31,6 @@ fn window_conf() -> Conf {
     }
 }
 
-
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "shape_0.png";
@@ -152,89 +151,52 @@ fn draw_frame(
 }
 
 fn get_edge_points(path: &str) -> Result<Vec<Point2D>, Box<dyn std::error::Error>> {
-    let img = ImageReader::open(path)
-        .map_err(|e| format!("Failed to open image '{}': {}", path, e))?
-        .decode()
-        .map_err(|e| format!("Failed to decode image '{}': {}", path, e))?
-        .to_luma8();
-
+    let img = ImageReader::open(path)?.decode()?.to_luma8();
     let (width, height) = img.dimensions();
-    let center_x = width as f32 / 2.0;
-    let center_y = height as f32 / 2.0;
+    let center = (width as f32 / 2.0, height as f32 / 2.0);
 
-    // 1. Canny Edge Detection
     let edges = canny(&img, CANNY_LOW_THRESHOLD, CANNY_HIGH_THRESHOLD);
-
-    // 2. Dilate to merge double edges
     let dilated = dilate(&edges, Norm::LInf, DILATE_RADIUS);
-
-    // 3. Skeletonize to get single centerline
     let skeleton = skeletonize(&dilated);
 
-    // 4. Extract non-zero pixels as points (centered at origin)
-    let mut points = Vec::new();
-    for (x, y, pixel) in skeleton.enumerate_pixels() {
-        if pixel[0] > 0 {
-            points.push((x as f32 - center_x, y as f32 - center_y));
-        }
-    }
+    let points: Vec<Point2D> = skeleton
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p[0] > 0)
+        .map(|(x, y, _)| (x as f32 - center.0, y as f32 - center.1))
+        .collect();
 
     Ok(sort_points(points))
 }
 
-/// Represents the 8 neighboring pixels around a center pixel
-struct Neighbors {
-    p2: u8, // North
-    p3: u8, // North-East
-    p4: u8, // East
-    p5: u8, // South-East
-    p6: u8, // South
-    p7: u8, // South-West
-    p8: u8, // West
-    p9: u8, // North-West
+fn get_neighbors(img: &GrayImage, x: u32, y: u32) -> [u8; 8] {
+    [
+        u8::from(img.get_pixel(x, y - 1)[0] > 0),     // N
+        u8::from(img.get_pixel(x + 1, y - 1)[0] > 0), // NE
+        u8::from(img.get_pixel(x + 1, y)[0] > 0),     // E
+        u8::from(img.get_pixel(x + 1, y + 1)[0] > 0), // SE
+        u8::from(img.get_pixel(x, y + 1)[0] > 0),     // S
+        u8::from(img.get_pixel(x - 1, y + 1)[0] > 0), // SW
+        u8::from(img.get_pixel(x - 1, y)[0] > 0),     // W
+        u8::from(img.get_pixel(x - 1, y - 1)[0] > 0), // NW
+    ]
 }
 
-impl Neighbors {
-    /// Gets the 8 neighbors of a pixel at (x, y) in the image
-    fn get(img: &GrayImage, x: u32, y: u32) -> Self {
-        Self {
-            p2: u8::from(img.get_pixel(x, y - 1)[0] > 0),
-            p3: u8::from(img.get_pixel(x + 1, y - 1)[0] > 0),
-            p4: u8::from(img.get_pixel(x + 1, y)[0] > 0),
-            p5: u8::from(img.get_pixel(x + 1, y + 1)[0] > 0),
-            p6: u8::from(img.get_pixel(x, y + 1)[0] > 0),
-            p7: u8::from(img.get_pixel(x - 1, y + 1)[0] > 0),
-            p8: u8::from(img.get_pixel(x - 1, y)[0] > 0),
-            p9: u8::from(img.get_pixel(x - 1, y - 1)[0] > 0),
-        }
-    }
+fn count_transitions(n: &[u8; 8]) -> u8 {
+    (0..8).filter(|&i| n[i] == 0 && n[(i + 1) % 8] == 1).count() as u8
+}
 
-    /// Counts the number of 0->1 transitions in the ordered sequence of neighbors
-    fn count_transitions(&self) -> u8 {
-        let transitions = [
-            (self.p2, self.p3),
-            (self.p3, self.p4),
-            (self.p4, self.p5),
-            (self.p5, self.p6),
-            (self.p6, self.p7),
-            (self.p7, self.p8),
-            (self.p8, self.p9),
-            (self.p9, self.p2),
-        ];
+fn should_remove(n: &[u8; 8], step: u8) -> bool {
+    let transitions = count_transitions(n);
+    let nonzero: u8 = n.iter().sum();
+    let condition = transitions == 1 && (2..=6).contains(&nonzero);
 
-        transitions
-            .iter()
-            .filter(|&&(prev, curr)| prev == 0 && curr == 1)
-            .count() as u8
-    }
-
-    /// Counts the total number of non-zero neighbors
-    fn count_nonzero(&self) -> u8 {
-        self.p2 + self.p3 + self.p4 + self.p5 + self.p6 + self.p7 + self.p8 + self.p9
+    if step == 1 {
+        condition && n[0] * n[2] * n[4] == 0 && n[2] * n[4] * n[6] == 0
+    } else {
+        condition && n[0] * n[2] * n[6] == 0 && n[0] * n[4] * n[6] == 0
     }
 }
 
-/// Applies Zhang-Suen thinning algorithm to skeletonize the image
 fn skeletonize(img: &GrayImage) -> GrayImage {
     let (width, height) = img.dimensions();
     let mut current = img.clone();
@@ -242,60 +204,33 @@ fn skeletonize(img: &GrayImage) -> GrayImage {
 
     while changed {
         changed = false;
-        let mut next = current.clone();
-        let mut to_clear = Vec::new();
 
-        // Step 1: Check first set of conditions
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                if current.get_pixel(x, y)[0] == 0 {
-                    continue;
-                }
+        for step in 1..=2 {
+            let mut to_clear = Vec::new();
 
-                let n = Neighbors::get(&current, x, y);
-                let a = n.count_transitions();
-                let b = n.count_nonzero();
-
-                if a == 1 && b >= 2 && b <= 6 && n.p2 * n.p4 * n.p6 == 0 && n.p4 * n.p6 * n.p8 == 0
-                {
-                    to_clear.push((x, y));
-                    changed = true;
+            for y in 1..height - 1 {
+                for x in 1..width - 1 {
+                    if current.get_pixel(x, y)[0] > 0 {
+                        let neighbors = get_neighbors(&current, x, y);
+                        if should_remove(&neighbors, step) {
+                            to_clear.push((x, y));
+                            changed = true;
+                        }
+                    }
                 }
             }
-        }
 
-        for &(x, y) in &to_clear {
-            next.put_pixel(x, y, Luma([0]));
-        }
-        current = next.clone();
-        to_clear.clear();
-
-        // Step 2: Check second set of conditions
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                if current.get_pixel(x, y)[0] == 0 {
-                    continue;
-                }
-
-                let n = Neighbors::get(&current, x, y);
-                let a = n.count_transitions();
-                let b = n.count_nonzero();
-
-                if a == 1 && b >= 2 && b <= 6 && n.p2 * n.p4 * n.p8 == 0 && n.p2 * n.p6 * n.p8 == 0
-                {
-                    to_clear.push((x, y));
-                    changed = true;
-                }
+            for (x, y) in to_clear {
+                current.put_pixel(x, y, Luma([0]));
             }
         }
-
-        for (x, y) in to_clear {
-            next.put_pixel(x, y, Luma([0]));
-        }
-        current = next;
     }
 
     current
+}
+
+fn dist_sq(p1: Point2D, p2: Point2D) -> f32 {
+    (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)
 }
 
 fn sort_points(mut points: Vec<Point2D>) -> Vec<Point2D> {
@@ -303,30 +238,28 @@ fn sort_points(mut points: Vec<Point2D>) -> Vec<Point2D> {
         return points;
     }
 
-    let mut sorted_points = Vec::with_capacity(points.len());
-    let mut current_point = points.remove(0);
-    sorted_points.push(current_point);
+    let mut sorted = Vec::with_capacity(points.len());
+    let mut current = points.remove(0);
+    sorted.push(current);
 
     while !points.is_empty() {
-        let mut nearest_idx = 0;
-        let mut min_dist_sq = f32::MAX;
+        let (idx, _) = points
+            .iter()
+            .enumerate()
+            .min_by(|(_, &a), (_, &b)| {
+                dist_sq(current, a)
+                    .partial_cmp(&dist_sq(current, b))
+                    .unwrap()
+            })
+            .unwrap();
 
-        for (i, &point) in points.iter().enumerate() {
-            let dist_sq = (current_point.0 - point.0).powi(2) + (current_point.1 - point.1).powi(2);
-            if dist_sq < min_dist_sq {
-                min_dist_sq = dist_sq;
-                nearest_idx = i;
-            }
-        }
-
-        current_point = points.swap_remove(nearest_idx);
-        sorted_points.push(current_point);
+        current = points.swap_remove(idx);
+        sorted.push(current);
     }
 
-    sorted_points
+    sorted
 }
 
-/// Represents a rotating circle (epicycle) in the Fourier series
 #[derive(Debug)]
 struct Epicycle {
     freq: f32,
@@ -334,27 +267,30 @@ struct Epicycle {
     phase: f32,
 }
 
-/// Converts FFT output to a sorted list of epicycles
 fn fft_to_epicycles(buffer: &[Complex<f32>], num_terms: usize) -> Vec<Epicycle> {
     let n = buffer.len();
     let mut epicycles: Vec<Epicycle> = buffer
         .iter()
         .enumerate()
-        .map(|(k, val)| {
-            // Convert frequency index to signed frequency
-            let freq = if k <= n / 2 {
-                k as f32
-            } else {
-                (k as i32 - n as i32) as f32
-            };
+        .filter_map(|(k, val)| {
             let amp = val.norm() / n as f32;
-            let phase = val.arg();
-            Epicycle { freq, amp, phase }
+            if amp > MIN_EPICYCLE_AMPLITUDE {
+                let freq = if k <= n / 2 {
+                    k as f32
+                } else {
+                    (k as i32 - n as i32) as f32
+                };
+                Some(Epicycle {
+                    freq,
+                    amp,
+                    phase: val.arg(),
+                })
+            } else {
+                None
+            }
         })
-        .filter(|e| e.amp > MIN_EPICYCLE_AMPLITUDE)
         .collect();
 
-    // Sort by amplitude (largest first) and keep only top terms
     epicycles.sort_by(|a, b| b.amp.partial_cmp(&a.amp).unwrap());
     epicycles.truncate(num_terms);
     epicycles
