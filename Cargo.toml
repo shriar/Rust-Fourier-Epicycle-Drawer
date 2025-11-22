@@ -1,0 +1,13 @@
+[package]
+name = "rust-fourier-draw"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+
+[dependencies]
+image = "0.25"
+imageproc = "0.25.0"
+rustfft = "6.0.0"
+macroquad = "0.3.25"
