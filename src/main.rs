@@ -31,6 +31,7 @@ fn window_conf() -> Conf {
     }
 }
 
+
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "shape_0.png";
